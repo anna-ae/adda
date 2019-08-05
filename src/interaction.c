@@ -75,6 +75,9 @@ void cisi(double x,double *ci,double *si);
 // somnec.c
 void som_init(complex double epscf);
 void evlua(double zphIn,double rhoIn,complex double *erv, complex double *ezv,complex double *erh, complex double *eph);
+//surf.c
+static void CalcPreTable();
+static void InterpolSomVal(double krho, double kz, double complex vals[static 4]);
 
 // this is used for debugging, should be empty define, when not required
 #define PRINT_GVAL /*printf("%s: %d,%d,%d: %g%+gi, %g%+gi, %g%+gi,\n%g%+gi, %g%+gi, %g%+gi\n",__func__,i,j,k,\
@@ -1177,13 +1180,13 @@ WRAPPERS_REFL(ReflTerm_img)
 
 //=====================================================================================================================
 
-static inline void SingleSomIntegral(double rho,const double z,doublecomplex vals[static 4])
+static inline void SingleSomIntegral(double krho,const double kz,doublecomplex vals[static 4])
 /* computes a single Sommerfeld integral (4-element array); arguments are in real units (um)
  * currently it is a wrapper around evlua, but in the future it may be replaced by use of interpolation table
  */
 {
 	// TODO: these scales can be removed by changes in som_init to use proper wavenumber instead of 2*pi
-	const double scale=WaveNum/TWO_PI;
+/*	const double scale=1/TWO_PI;
 	const double isc=pow(scale,3); // this is subject to under/overflow
 
 	if (rho==0) rho=z*0.00000001; // a hack to overcome the poor precision of somnec for rho=0;
@@ -1191,7 +1194,8 @@ static inline void SingleSomIntegral(double rho,const double z,doublecomplex val
 	vals[0]*=isc;
 	vals[1]*=isc;
 	vals[2]*=isc;
-	vals[3]*=isc;
+	vals[3]*=isc;*/
+	InterpolSomVal(krho, kz, vals);
 }
 
 //=====================================================================================================================
@@ -1231,6 +1235,7 @@ static void CalcSomTable(void)
 	 */
 	if (gridSpaceX!=gridSpaceY) LogError(ONE_POS,"Incompatibility error in CalcSomTable");
 	XlessY=(boxX<=boxY);
+	CalcPreTable();
 	// create index for plane x,y; if boxX<=boxY the space above the main diagonal is indexed (so x<=y) and vice versa
 	MALLOC_VECTOR(somIndex,sizet,boxY+1,ALL);
 	memory+=(boxY+1)*sizeof(size_t);
@@ -1247,8 +1252,8 @@ static void CalcSomTable(void)
 			z=(k+ZsumShift)*gridSpaceZ;
 			for (j=0;j<boxY;j++) {
 				if (XlessY) for (i=0;i<=j && i<boxX;i++,ind++) 
-					SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
-				else for (i=j;i<boxX;i++,ind++) SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
+					SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum,z*WaveNum,somTable+4*ind);
+				else for (i=j;i<boxX;i++,ind++) SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum,z*WaveNum,somTable+4*ind);
 			}
 		}
 	}
@@ -1264,6 +1269,7 @@ static inline void CombineSomTensor(const double x, const double y,const double 
 {
 	double xr,yr; // relative (scaled by ro) transverse coordinates
 	doublecomplex Irv,Izv,Irh,Iph; // values of Sommerfeld integrals
+	double k3 = pow(WaveNum, 3.0); //dimension coefficient
 
 	// index tables
 	Irv=Ivals[0];
@@ -1275,19 +1281,19 @@ static inline void CombineSomTensor(const double x, const double y,const double 
 		/* particular direction doesn't matter in this case; this special case can be obtained from
 		 * general case by taking, e.g. xr=1, yr=0 (since Iph+Irh=Irv=0 for rho=0).
 		 */
-		result[0] += Irh;
-		result[3] += Irh;
-		result[5] += Izv;
+		result[0] += Irh*k3;
+		result[3] += Irh*k3;
+		result[5] += Izv*k3;
 	}
 	else {
 		xr=x/rho;
 		yr=y/rho;
-		result[0] += xr*xr*Irh - yr*yr*Iph;
-		result[1] += xr*yr*(Irh+Iph);
-		result[2] += xr*Irv;
-		result[3] += yr*yr*Irh - xr*xr*Iph;
-		result[4] += yr*Irv;
-		result[5] += Izv;
+		result[0] += xr*xr*Irh*k3 - yr*yr*Iph*k3;
+		result[1] += xr*yr*(Irh+Iph)*k3;
+		result[2] += xr*Irv*k3;
+		result[3] += yr*yr*Irh*k3 - xr*xr*Iph*k3;
+		result[4] += yr*Irv*k3;
+		result[5] += Izv*k3;
 	}
 }
 
@@ -1347,7 +1353,7 @@ void ReflTerm_som_real(const double qvec[static restrict 3],doublecomplex result
 	double y=qvec[1];
 	double rho=hypot(x,y);
 	doublecomplex Ivals[4];
-	SingleSomIntegral(rho,qvec[2],Ivals);
+	SingleSomIntegral(rho*WaveNum,qvec[2]*WaveNum,Ivals);
 	CombineSomTensor(x,y,rho,Ivals,result);
 	PRINT_GVAL;
 }
