@@ -58,6 +58,18 @@ static bool XlessY; // whether boxX is not larger than boxY (used for SomTable)
 static doublecomplex * restrict somTable; // table of Sommerfeld integrals
 static size_t * restrict somIndex; // array for indexing somTable (in the xy-plane)
 
+//parameters of interpolation
+static doublecomplex * preTable; //table of Sommerfeld integrals for interpolation
+static const int Nt = 200; //number of points along t-axis of the interpolation table (zero points not included)
+static const int Nth = 200; //number of points along theta-axis of the interpolation table
+static const double tmin = 0.02; //lower limit of the interpolation region along t-axis
+static const double tmax = 0.97; //upper limit of the interpolation region along t-axis
+static const double thetamin = 0.0; //lower limit of the interpolation region along theta-axis
+static const double thetamax = PI_OVER_TWO; //upper limit of the interpolation region along theta-axis
+static const int deg = 4; //interpolation polynomial degree (deg = 4 - cubic interpolation)
+static const double ht = (tmax - tmin) / (Nt - 1);
+static const double hth = (thetamax - thetamin) / (Nth - 1);
+
 #ifdef USE_SSE3
 static __m128d c1, c2, c3, zo, inv_2pi, p360, prad_to_deg;
 static __m128d exptbl[361];
@@ -1196,6 +1208,243 @@ static inline void SingleSomIntegral(double rho,const double z,doublecomplex val
 
 //=====================================================================================================================
 
+static void FillZero(complex double eps){
+	int j;
+	complex double g = (eps - 1) / (eps + 1);
+	double theta = thetamin;
+	complex double Cos, Sin, Svr, Svz, Shr, Shp;
+	complex double s, L, Z1, Z2, C1, C2, S2vz, S2hr, S2hp;
+	complex double Rs, Rp, fvr, fvz, fhr, fhp;
+
+	for(j = 0; j < Nth; j++){
+		Sin = sin(theta);
+		Cos = cos(theta);
+		Rs = (Cos - csqrt(eps - Sin*Sin)) / (Cos + csqrt(eps - Sin*Sin));
+		Rp = (eps * Cos - csqrt(eps - Sin*Sin)) / (eps * Cos + csqrt(eps - Sin*Sin));
+		fvr = (- Rp + g)*Sin*Cos;
+		fvz = (Rp - g)*Sin*Sin;
+		fhr = (- Rp + g)*Cos*Cos;
+		fhp = - (g + Rs);
+
+		s = csqrt(eps + 1.0);
+		L = (eps / ((eps - 1.0) * s)) * clog((1.0 + s) / (eps + s * csqrt(eps)));
+		Z1 = 1.0 / ((eps + 1.0)*(eps + 1.0));
+		Z2 = 1.0 / (3 * (csqrt(eps) + 1.0));
+		C1 = 1.0 - 3 * csqrt(eps) + 3 * eps + 2 * eps*eps;
+		C2 = 1.0 + 2 * eps - eps*eps*eps + csqrt(eps) * (1.0 + 2 * eps - 2 * eps*eps);
+
+		S2vz = - 2j * (g / 3 + Z1 * (C2 * Z2 + L * eps*eps));
+		S2hr = I * (2 * g / 3 + eps * Z1 * (C1 * Z2 + L));
+		S2hp = -I * (2 * g / 3 + eps * Z1 * (C1 * Z2 + L));
+
+		preTable[j*4] = - I * fvr;
+		preTable[j*4 + 1] = S2vz - I * fvz;
+		preTable[j*4 + 2] = S2hr - I * fhr;
+		preTable[j*4 + 3] = S2hp - I * fhp;
+		theta += hth;
+	}
+}
+
+//=====================================================================================================================
+
+static void TransformInt(double complex vals[static 4], double krho, double kz, complex double eps, unsigned char f){  //f = 0 - transform the integrals, f = 1 - transform backwards
+	double q = sqrt(krho*krho + kz*kz);
+	complex double g = (eps - 1) / (eps + 1);
+	double Sin = krho / q;
+	double Cos = kz / q;
+	complex double Rs = (Cos - csqrt(eps - Sin*Sin)) / (Cos + csqrt(eps - Sin*Sin));
+	complex double Rp = (eps * Cos - csqrt(eps - Sin*Sin)) / (eps * Cos + csqrt(eps - Sin*Sin));
+
+	complex double fvr = (- Rp + g)*Sin*Cos;
+	complex double fvz = (Rp - g)*Sin*Sin;
+	complex double fhr = (- Rp + g)*Cos*Cos;
+	complex double fhp = - (g + Rs);
+
+	complex double Svr = g * (eps/(eps + 1)) * (Sin / (1 + Cos));
+	complex double Svz = g * eps / (eps + 1);
+	complex double Shr = g * (1 - Cos / ((eps + 1) * (1 + Cos)));
+	complex double Shp = - g * (eps / (eps + 1) + Cos / ((eps + 1) * (1 + Cos)));
+	double QQ = (q*q + 1) / q;
+
+	if (f == 0){
+		vals[0] = (vals[0] * q * cexp(- I*q) - (Svr + I * fvr * q) / (1 + I * q)) * QQ;
+		vals[1] = (vals[1] * q * cexp(- I*q) - (Svz + I * fvz * q) / (1 + I * q)) * QQ;
+		vals[2] = (vals[2] * q * cexp(- I*q) - (Shr + I * fhr * q) / (1 + I * q)) * QQ;
+		vals[3] = (vals[3] * q * cexp(- I*q) - (Shp + I * fhp * q) / (1 + I * q)) * QQ;
+	}
+	if (f == 1){
+		vals[0] = ((vals[0] / QQ) + (Svr + I * fvr * q) / (1 + I * q)) * cexp(I*q) / q;
+		vals[1] = ((vals[1] / QQ) + (Svz + I * fvz * q) / (1 + I * q)) * cexp(I*q) / q;
+		vals[2] = ((vals[2] / QQ) + (Shr + I * fhr * q) / (1 + I * q)) * cexp(I*q) / q;
+		vals[3] = ((vals[3] / QQ) + (Shp + I * fhp * q) / (1 + I * q)) * cexp(I*q) / q;
+	}
+}
+
+//=====================================================================================================================
+
+static void CalcPreTable(complex double eps){
+	int i, j, l;
+	double t = tmin;
+	double theta = thetamin;
+	double krho, kz, q;
+	//printf("eps = %.2f %.2f\r\n", creal(eps), cimag(eps));
+	preTable = (complex double *)malloc(sizeof(complex double)*4*(Nt+1)*Nth);
+	FillZero(eps);
+	for(i = 1; i <= Nt; i++){
+		for(j = 0; j < Nth; j++){
+			q = t / (1 - t);
+			kz = q / sqrt(1 + tan(theta)*tan(theta));
+			krho = kz * tan(theta);
+			SingleSomIntegral(krho/WaveNum, kz/WaveNum, preTable + i*Nth*4 + j*4);
+			preTable[i*Nth*4 + j*4] = preTable[i*Nth*4 + j*4] / pow(WaveNum,3);
+			preTable[i*Nth*4 + j*4 + 1] = preTable[i*Nth*4 + j*4 + 1] / pow(WaveNum,3);
+			preTable[i*Nth*4 + j*4 + 2] = preTable[i*Nth*4 + j*4 + 2] / pow(WaveNum,3);
+			preTable[i*Nth*4 + j*4 + 3] = preTable[i*Nth*4 + j*4 + 3] / pow(WaveNum,3);
+
+			TransformInt(preTable + i*Nth*4 + j*4, krho, kz, eps, 0);
+			theta += hth;
+		}
+		theta = thetamin;
+		t += ht;
+	}
+}
+
+//=====================================================================================================================
+
+static void OnePoly(double x0, double x[deg], complex double S1[deg], complex double S0[1]){
+	complex double A[deg][deg], P;
+	int i, j, k;
+	for (i = 0; i < deg; i++){
+		for (j = 0; j < deg; j++){
+			A[i][j] = 0;
+		}
+	}
+	for (i = 0; i < deg; i++){
+		A[i][0] = S1[i];
+	}
+	for (k = 1; k < deg; k++){
+		for (i = 0; i < deg - k; i++){
+			A[i][k] = (A[i][k - 1] - A[i + 1][k - 1]) / (x[i] - x[i + k]);
+		}
+	}
+	P = A[0][deg - 1];
+	for (j = deg - 2; j >= 0; j--){
+		P = P * (x0 - x[j]) + A[0][j];
+	}
+	S0[0] = P;
+}
+
+//=====================================================================================================================
+
+static void PolyInt(double x0, double y0, double * x, double * y, complex double * S, double complex vals[static 4]){
+	complex double * S0;
+	S0 = (complex double *)malloc(sizeof(complex double)*deg*4);
+	int i;
+	for(i = 0; i < deg; i++){
+		OnePoly(y0, y, S + i*deg*4, S0 + i);
+		OnePoly(y0, y, S + i*deg*4 + deg, S0 + i + deg);
+		OnePoly(y0, y, S + i*deg*4 + 2*deg, S0 + i + 2*deg);
+		OnePoly(y0, y, S + i*deg*4 + 3*deg, S0 + i + 3*deg);
+	}
+	OnePoly(x0, x, S0, vals);
+	OnePoly(x0, x, S0 + deg, vals + 1);
+	OnePoly(x0, x, S0 + 2*deg, vals + 2);
+	OnePoly(x0, x, S0 + 3*deg, vals + 3);
+}
+
+//=====================================================================================================================
+
+static void InterpolSomVal(double krho, double kz, double complex vals[static 4]){
+	int i, j;
+	double t0, theta0, q0;
+	q0 = sqrt(krho*krho + kz*kz);
+	t0 = q0 / (q0 + 1);
+	theta0 = atan(krho / kz);
+	double * x;
+	double * y;
+	complex double * S;
+	int * xn;
+	int * yn;
+	x = (double *)malloc(sizeof(double)*deg);
+	y = (double *)malloc(sizeof(double)*deg);
+	S = (complex double *)malloc(sizeof(complex double)*deg*deg*4);
+	xn = (int *)malloc(sizeof(int)*deg);
+	yn = (int *)malloc(sizeof(int)*deg);
+	double a, b;
+	int an, bn;
+	if (t0 < tmin){
+		a = 0.0;
+		an = 0;
+	} else {
+		a = (double)((int)((t0 - tmin) / ht)) * ht + tmin;
+		an = (int)((t0 - tmin) / ht);
+		if (tmin != 0.0){
+			an++;
+		}
+	}
+	if (theta0 < thetamin){
+		b = thetamin;
+		bn = 0;
+	} else {
+		b = (double)((int)((theta0 - thetamin) / hth)) * hth + thetamin;
+		bn = (int)((theta0 - thetamin) / hth);
+	}
+	if ((an + (deg + 1) / 2) >= Nt){
+		for(j = 0; j < deg; j++){
+			x[j] = tmax - (deg - 1) * ht + j * ht;
+			xn[j] = Nt - (deg - 1) + j;
+		}
+	} else {
+		if ((an - deg / 2 + 1) <= 0){
+			x[0] = 0.0;
+			xn[0] = 0;
+			for(j = 1; j < deg; j++){
+				x[j] = tmin + (j - 1) * ht;
+				xn[j] = j;
+			}
+		} else {
+			for(j = 0; j < deg; j++){
+				x[j] = a - (deg / 2) * ht + (j + 1) * ht;
+				xn[j] = an - (deg / 2) + 1 + j;
+			}
+		}
+	}
+	if ((bn + (deg + 1) / 2) >= Nth - 1){
+		for(j = 0; j < deg; j++){
+			y[j] = thetamax - (deg - 1) * hth + j * hth;
+			yn[j] = Nth - 1 - (deg - 1) + j;
+		}
+	} else {
+		if ((bn - deg / 2 + 1) <= 0){
+			for(j = 0; j < deg; j++){
+				y[j] = j * hth + thetamin;
+				yn[j] = j;
+			}
+		} else {
+			for(j = 0; j < deg; j++){
+				y[j] = b - (deg / 2) * hth + (j + 1) * hth;
+				yn[j] = bn - (deg / 2) + 1 + j;
+			}
+		}
+	}
+	for(i = 0; i < deg; i++){
+		for (j = 0; j < deg; j++){
+			S[i * deg * 4 + j] = preTable[xn[i]*Nth*4 + yn[j]*4];
+			S[i * deg * 4 + j + deg] = preTable[xn[i]*Nth*4 + yn[j]*4 + 1];
+			S[i * deg * 4 + j + 2*deg] = preTable[xn[i]*Nth*4 + yn[j]*4 + 2];
+			S[i * deg * 4 + j + 3*deg] = preTable[xn[i]*Nth*4 + yn[j]*4 + 3];
+		}
+	}
+	PolyInt(t0, theta0, x, y, S, vals);
+	free(x);
+	free(xn);
+	free(y);
+	free(yn);
+	free(S);
+}
+
+//=====================================================================================================================
+
 static void CalcSomTable(void)
 /* calculates a table of (essential Sommerfeld integrals), which are further combined into reflected Green's tensor
  * For z values - all local grid; for x- and y-values only positive values are considered and additionally y<=x.
@@ -1229,6 +1478,15 @@ static void CalcSomTable(void)
 	 * benefit from dX!=dY. Second, the issue will be solved automatically once optimized routines are implemented 
 	 * (as discussed above).
 	 */
+	/*double complex ref[4];
+	double error_mean[4];
+	double RE;
+	int l;*/
+	complex double eps = cpow(msub,2);
+	CalcPreTable(eps);
+	/*for(l=0;l<4;l++){
+		error_mean[l] = 0;
+	}*/
 	if (gridSpaceX!=gridSpaceY) LogError(ONE_POS,"Incompatibility error in CalcSomTable");
 	XlessY=(boxX<=boxY);
 	// create index for plane x,y; if boxX<=boxY the space above the main diagonal is indexed (so x<=y) and vice versa
@@ -1239,6 +1497,9 @@ static void CalcSomTable(void)
 	// allocate and fill the table
 	const size_t tmp=4*local_Nz_Rm*somIndex[boxY];
 	memory+=tmp*sizeof(doublecomplex);
+	/*FILE *fd = fopen("ST_interpol.txt", "wb");
+	FILE *fd1 = fopen("ST_somnec.txt", "wb");
+	FILE *fd2 = fopen("ST_rel_error.txt", "wb");*/
 	if (!prognosis) {
 		MALLOC_VECTOR(somTable,complex,tmp,ALL);
 		if (IFROOT) printf("Calculating table of Sommerfeld integrals\n");
@@ -1246,12 +1507,65 @@ static void CalcSomTable(void)
 		for (k=0;k<local_Nz_Rm;k++) {
 			z=(k+ZsumShift)*gridSpaceZ;
 			for (j=0;j<boxY;j++) {
-				if (XlessY) for (i=0;i<=j && i<boxX;i++,ind++) 
-					SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
-				else for (i=j;i<boxX;i++,ind++) SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
+				if (XlessY) for (i=0;i<=j && i<boxX;i++,ind++){
+					//SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
+					InterpolSomVal(hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum,z*WaveNum,somTable+4*ind);
+					TransformInt(somTable+4*ind, hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum, z*WaveNum, eps, 1);
+					somTable[4*ind] = somTable[4*ind]*pow(WaveNum,3);
+					somTable[4*ind+1] = somTable[4*ind+1]*pow(WaveNum,3);
+					somTable[4*ind+2] = somTable[4*ind+2]*pow(WaveNum,3);
+					somTable[4*ind+3] = somTable[4*ind+3]*pow(WaveNum,3);
+
+					/*SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,ref);
+					fprintf(fd, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					fprintf(fd1, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					fprintf(fd2, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					for(l=0;l<4;l++){
+						RE = cabs((somTable[4*ind+l]-ref[l])/ref[l]);
+						error_mean[l] += RE;
+						fprintf(fd2, " %.2e", RE);
+						fprintf(fd1, " %.5e %.5e", creal(ref[l]), cimag(ref[l]));
+						fprintf(fd, " %.5e %.5e", creal(somTable[4*ind+l]), cimag(somTable[4*ind+l]));
+					}
+					fprintf(fd, "\r\n");
+					fprintf(fd1, "\r\n");
+					fprintf(fd2, "\r\n");*/
+				}
+				else for (i=j;i<boxX;i++,ind++){
+					//SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,somTable+4*ind);
+					InterpolSomVal(hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum,z*WaveNum,somTable+4*ind);
+					TransformInt(somTable+4*ind, hypot(i*gridSpaceX,j*gridSpaceY)*WaveNum, z*WaveNum, eps, 1);
+					somTable[4*ind] = somTable[4*ind]*pow(WaveNum,3);
+					somTable[4*ind+1] = somTable[4*ind+1]*pow(WaveNum,3);
+					somTable[4*ind+2] = somTable[4*ind+2]*pow(WaveNum,3);
+					somTable[4*ind+3] = somTable[4*ind+3]*pow(WaveNum,3);
+
+					/*SingleSomIntegral(hypot(i*gridSpaceX,j*gridSpaceY),z,ref);
+					fprintf(fd, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					fprintf(fd1, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					fprintf(fd2, "%.5f %.5f", hypot(i*gridSpaceX,j*gridSpaceY), z);
+					for(l=0;l<4;l++){
+						RE = cabs((somTable[4*ind+l]-ref[l])/ref[l]);
+						error_mean[l] += RE;
+						fprintf(fd2, " %.2e", RE);
+						fprintf(fd1, " %.5e %.5e", creal(ref[l]), cimag(ref[l]));
+						fprintf(fd, " %.5e %.5e", creal(somTable[4*ind+l]), cimag(somTable[4*ind+l]));
+					}
+					fprintf(fd, "\r\n");
+					fprintf(fd1, "\r\n");
+					fprintf(fd2, "\r\n");*/
+				}
 			}
 		}
+		/*for(l=0;l<4;l++){
+			error_mean[l] /= (ind+1);
+			printf("%f ", error_mean[l]);
+		}
+		printf("\n");*/
 	}
+	/*fclose(fd);
+	fclose(fd1);
+	fclose(fd2);*/
 }
 
 //=====================================================================================================================
